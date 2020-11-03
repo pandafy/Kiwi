@@ -4,6 +4,7 @@
 from xmlrpc.client import Fault, ProtocolError
 
 from django.contrib.auth.models import Permission
+from django.core.exceptions import ValidationError
 from tcms_api import xmlrpc
 
 from tcms.core.helpers import comments
@@ -16,8 +17,83 @@ from tcms.tests.factories import (CategoryFactory, ComponentFactory,
                                   TestPlanFactory, UserFactory, VersionFactory)
 
 
+class TestNotificationAddCC(APITestCase):
+    """ Tests the XML-RPC testcase.add_notification_cc method """
+
+    def _fixture_setup(self):
+        super()._fixture_setup()
+
+        self.default_cc = 'example@MrSenko.com'
+        self.testcase = TestCaseFactory()
+
+    def tearDown(self):
+        super().tearDown()
+        self.rpc_client.Auth.logout()
+
+    def test_email_validation_fails(self):
+        # Validating not a list of emails
+        with self.assertRaisesRegex(Fault, 'cc_list should be a list object'):
+            self.rpc_client.TestCase.remove_notification_cc(self.testcase.pk,
+                                                            None)
+        # Validation invalid emails
+        with self.assertRaisesRegex(Fault, 'invalid'):
+            self.rpc_client.TestCase.remove_notification_cc(self.testcase.pk,
+                                                            ['MrSenko.com'])
+
+    def test_add_cc_without_permission(self):
+        unauthorized_user = UserFactory()
+        unauthorized_user.set_password('api-testing')
+        unauthorized_user.save()
+
+        unauthorized_user.user_permissions.add(*Permission.objects.all())
+        remove_perm_from_user(unauthorized_user, 'testcases.change_testcase')
+
+        rpc_client = xmlrpc.TCMSXmlrpc(unauthorized_user.username,
+                                       'api-testing',
+                                       '%s/xml-rpc/' % self.live_server_url).server
+
+        with self.assertRaisesRegex(ProtocolError, '403 Forbidden'):
+            rpc_client.TestCase.add_notification_cc(self.testcase.pk, [self.default_cc])
+
+    def test_add_cc_list(self):
+        self.rpc_client.TestCase.add_notification_cc(self.testcase.pk, [self.default_cc])
+        notification_cc_list = self.rpc_client.TestCase.get_notification_cc(self.testcase.pk)
+        self.assertEqual(len(notification_cc_list), 1)
+        self.assertEqual(notification_cc_list[0], self.default_cc)
+
+
+class NotificationGetCC(APITestCase):
+    """ Tests the XML-RPC testcase.get_notification_cc method """
+
+    def _fixture_setup(self):
+        super()._fixture_setup()
+
+        self.default_cc = 'example@MrSenko.com'
+        self.testcase = TestCaseFactory()
+        self.testcase.emailing.add_cc(self.default_cc)
+
+    def test_get_cc_list_without_permission(self):
+        unauthorized_user = UserFactory()
+        unauthorized_user.set_password('api-testing')
+        unauthorized_user.save()
+
+        unauthorized_user.user_permissions.add(*Permission.objects.all())
+        remove_perm_from_user(unauthorized_user, 'testcases.view_testcase')
+
+        rpc_client = xmlrpc.TCMSXmlrpc(unauthorized_user.username,
+                                       'api-testing',
+                                       '%s/xml-rpc/' % self.live_server_url).server
+
+        with self.assertRaisesRegex(ProtocolError, '403 Forbidden'):
+            rpc_client.TestCase.get_notification_cc(self.testcase.pk)
+
+    def test_get_cc_list(self):
+        cc_list = self.rpc_client.TestCase.get_notification_cc(self.testcase.pk)
+        self.assertListEqual(cc_list, [self.default_cc])
+
+
 class TestNotificationRemoveCC(APITestCase):
-    """ Tests the XML-RPC testcase.notication_remove_cc method """
+    """ Tests the XML-RPC testcase.remove_notification_cc method """
 
     def _fixture_setup(self):
         super()._fixture_setup()
@@ -63,6 +139,25 @@ class TestFilterCases(APITestCase):
                 default_tester=None,
                 plan=[self.plan])
             self.cases.append(test_case)
+
+    def test_filter_without_permissions(self):
+        unauthorized_user = UserFactory()
+        unauthorized_user.set_password('api-testing')
+        unauthorized_user.save()
+
+        unauthorized_user.user_permissions.add(*Permission.objects.all())
+        remove_perm_from_user(unauthorized_user, 'testcases.view_testcase')
+
+        rpc_client = xmlrpc.TCMSXmlrpc(unauthorized_user.username,
+                                       'api-testing',
+                                       '%s/xml-rpc/' % self.live_server_url).server
+
+        with self.assertRaisesRegex(ProtocolError, '403 Forbidden'):
+            rpc_client.TestCase.filter(None)
+
+    def test_filter_query_none(self):
+        result = self.rpc_client.TestCase.filter()
+        self.assertDictEqual(result, {})
 
     def test_filter_by_product_id(self):
         cases = self.rpc_client.TestCase.filter({'category__product': self.product.pk})
@@ -430,6 +525,26 @@ class TestCreate(APITestCase):
             )
 
 
+class TestRemovePermissions(APIPermissionsTestCase):
+    permission_label = 'testcases.delete_testcase'
+
+    def _fixture_setup(self):
+        super()._fixture_setup()
+
+        self.case_1 = TestCaseFactory()
+        self.case_2 = TestCaseFactory()
+        self.case_3 = TestCaseFactory()
+
+        self.query = {'pk__in': [self.case_1.pk, self.case_2.pk, self.case_3.pk]}
+
+    def verify_api_with_permission(self):
+        len_deleted, _ = self.rpc_client.TestCase.remove(self.query)
+        self.assertEqual(len_deleted, 3)
+
+    def verify_api_without_permission(self):
+        with self.assertRaisesRegex(ProtocolError, '403 Forbidden'):
+            self.rpc_client.TestCase.remove(self.query)
+
 class TestAddTag(APITestCase):
 
     def _fixture_setup(self):
@@ -522,6 +637,39 @@ class TestAddComponent(APITestCase):
             self.rpc_client.TestCase.add_component(self.test_case.pk, self.bad_component.name)
 
 
+class TestRemoveComponent(APITestCase):
+
+    def _fixture_setup(self):
+        super()._fixture_setup()
+        self.test_case = TestCaseFactory()
+        self.good_component = ComponentFactory(product=self.test_case.category.product)
+        self.bad_component = ComponentFactory()
+
+    def test_remove_component(self):
+        self.rpc_client.TestCase.remove_component(self.test_case.pk,
+                                                  self.good_component.pk)
+
+    def test_remove_component_without_permission(self):
+        unauthorized_user = UserFactory()
+        unauthorized_user.set_password('api-testing')
+        unauthorized_user.save()
+
+        unauthorized_user.user_permissions.add(*Permission.objects.all())
+        remove_perm_from_user(unauthorized_user, 'testcases.delete_testcasecomponent')
+
+        rpc_client = xmlrpc.TCMSXmlrpc(unauthorized_user.username,
+                                       'api-testing',
+                                       '%s/xml-rpc/' % self.live_server_url).server
+
+        with self.assertRaisesRegex(ProtocolError, '403 Forbidden'):
+            rpc_client.TestCase.remove_component(self.test_case.pk,
+                                                 self.good_component.pk)
+
+    def test_remove_non_existing_component(self):
+        with self.assertRaises(Fault):
+            self.rpc_client.TestCase.remove_component(self.test_case.pk, 0)
+
+
 class TestCaseAddComment(APITestCase):
     def _fixture_setup(self):
         super()._fixture_setup()
@@ -539,6 +687,31 @@ class TestCaseAddComment(APITestCase):
         first_comment = result.first()
         self.assertEqual("Hello World!", first_comment.comment)
         self.assertEqual("Hello World!", created_comment['comment'])
+
+
+class TestCaseRemoveCommentsPermissions(APIPermissionsTestCase):
+    permission_label = 'django_comments.delete_comment'
+
+    def _fixture_setup(self):
+        super()._fixture_setup()
+
+        self.case = TestCaseFactory()
+        self.comment_1 = comments.add_comment([self.case], 'First one', self.tester)[0]
+        self.comment_2 = comments.add_comment([self.case], 'Second one', self.tester)[0]
+        self.comment_3 = comments.add_comment([self.case], 'Third one', self.tester)[0]
+
+    def verify_api_with_permission(self):
+        # Remove a specific comment
+        self.rpc_client.TestCase.remove_comment(self.case.pk, self.comment_1.pk)
+        self.assertEqual(len(comments.get_comments(self.case)), 2)
+
+        # Remove all comments
+        self.rpc_client.TestCase.remove_comment(self.case.pk)
+        self.assertEqual(len(comments.get_comments(self.case)), 0)
+
+    def verify_api_without_permission(self):
+        with self.assertRaisesRegex(ProtocolError, '403 Forbidden'):
+            self.rpc_client.TestCase.remove_comment(self.case.pk)
 
 
 class TestCaseSortkeysPermissions(APIPermissionsTestCase):
@@ -575,6 +748,10 @@ class TestCaseSortkeysPermissions(APIPermissionsTestCase):
 
         self.assertEqual(result[2]['case_id'], self.case_3.pk)
         self.assertEqual(result[2]['sortkey'], 25)
+
+        # Test with query none
+        result = self.rpc_client.TestCase.sortkeys()
+        self.assertDictEqual(result, {})
 
     def verify_api_without_permission(self):
         with self.assertRaisesRegex(ProtocolError, '403 Forbidden'):

@@ -173,7 +173,7 @@ def get_notification_cc(case_id):
         :rtype: list(str)
         :raises: TestCase.DoesNotExist if object with case_id doesn't exist
     """
-    return TestCase.objects.get(pk=case_id).get_cc_list()
+    return TestCase.objects.get(pk=case_id).emailing.get_cc_list()
 
 
 @permissions_required('testcases.add_testcasetag')
